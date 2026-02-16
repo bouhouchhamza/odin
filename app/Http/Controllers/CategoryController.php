@@ -2,84 +2,75 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\category;
-use Illuminate\Http\Request;
+use App\Http\Requests\StoreCategoryRequest;
+use App\Http\Requests\UpdateCategoryRequest;
+use App\Models\Category;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\View\View;
 
 class CategoryController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index()
+    public function index(): View
     {
-      $categories = category::where('user_id',auth()->id())->get();
-      return view('categories.index',compact('categories'));
+        $this->authorize('viewAny', Category::class);
+
+        $query = Category::query()->orderBy('name');
+
+        if (!auth()->user()->isAdmin()) {
+            $query->where('user_id', auth()->id());
+        }
+
+        $categories = $query->paginate(20);
+
+        return view('categories.index', compact('categories'));
     }
 
-    /**
-     * Show the form for creating a new resource.
-     */
-    public function create()
+    public function create(): View
     {
-       return view('categories.create');
+        $this->authorize('create', Category::class);
+
+        return view('categories.create');
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
-    public function store(Request $request)
+    public function store(StoreCategoryRequest $request): RedirectResponse
     {
-        $request->validate([
-            'name' => 'required|string|max:255',
-            ]);
-        category::create([
-            'name' =>$request->name,
-            'user_id' =>auth()->id(),
+        Category::create([
+            'name' => $request->string('name')->toString(),
+            'user_id' => auth()->id(),
         ]);
-        return redirect()->route('categories.index')->with('success','Category ajoutée avec succés');
+
+        return redirect()->route('categories.index')->with('success', 'Category created.');
     }
 
-    /**
-     * Display the specified resource.
-     */
-    public function show(category $category)
+    public function show(Category $category): View
     {
-        //
+        $this->authorize('view', $category);
+
+        return view('categories.show', compact('category'));
     }
 
-    /**
-     * Show the form for editing the specified resource.
-     */
-    public function edit(category $category)
+    public function edit(Category $category): View
     {
-        abort_if($category->user_id !== auth()->id(), 403);
+        $this->authorize('update', $category);
+
         return view('categories.edit', compact('category'));
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
-    public function update(Request $request, category $category)
+    public function update(UpdateCategoryRequest $request, Category $category): RedirectResponse
     {
-        abort_if($category->user_id !== auth()->id(), 403);
-        $request->validate([
-            'name' =>'required|string|max:255',
-        ]);
         $category->update([
-            'name' => $request->name,
+            'name' => $request->string('name')->toString(),
         ]);
 
-        return redirect()->route('categories.index')->with('success','Category modifiée');
+        return redirect()->route('categories.index')->with('success', 'Category updated.');
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
-    public function destroy(category $category)
+    public function destroy(Category $category): RedirectResponse
     {
-        abort_if($category->user_id !== auth()->id(), 403);
+        $this->authorize('delete', $category);
+
         $category->delete();
 
-        return redirect()->route('categories.index')->with('success','Category supprimée');
+        return redirect()->route('categories.index')->with('success', 'Category deleted.');
     }
 }
