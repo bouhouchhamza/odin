@@ -2,116 +2,176 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\StoreLinkRequest;
+use App\Http\Requests\UpdateLinkRequest;
 use App\Models\Category;
 use App\Models\Link;
 use App\Models\Tag;
+use App\Models\User;
+use App\Services\LinkService;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class LinksController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     */
-    public function index()
+    public function __construct(private readonly LinkService $linkService)
     {
-        $links = Link::where('user_id', auth()->id())
-            ->with(['category', 'tags'])
-            ->get();
-
-        return view('links.index', compact('links'));
     }
 
-    /**
-     * Show the form for creating a new resource.
-     */
-    public function create()
+    public function index(Request $request): View
     {
-        $categories = Category::where('user_id', auth()->id())->get();
-        $tags = Tag::all();
+        $this->authorize('viewAny', Link::class);
+        $user = $request->user() ?? auth()->user();
+
+        $links = Link::query()
+            ->visibleTo($user)
+            ->with(['category', 'tags', 'sharedUsers:id,name,email'])
+            ->withCount('favoritedByUsers')
+            ->search($request->string('search')->toString())
+            ->when($request->boolean('favorites_only'), function ($query) use ($request) {
+                $query->whereHas('favoritedByUsers', function ($sq) use ($request) {
+                    $sq->where('users.id', $request->user()->id);
+                });
+            })
+            ->latest()
+            ->paginate(15)
+            ->withQueryString();
+
+        $shareableUsers = User::query()
+            ->whereKeyNot($user->id)
+            ->orderBy('name')
+            ->get(['id', 'name', 'email']);
+
+        return view('links.index', compact('links', 'shareableUsers'));
+    }
+
+    public function create(): View
+    {
+        $this->authorize('create', Link::class);
+
+        $categories = Category::query()
+            ->where('user_id', auth()->id())
+            ->orderBy('name')
+            ->get();
+
+        $tags = Tag::query()->orderBy('name')->get();
 
         return view('links.create', compact('categories', 'tags'));
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
-    public function store(Request $request)
+    public function store(StoreLinkRequest $request): RedirectResponse
     {
-        $request->validate([
-            'title' => 'required|string|max:255',
-            'url' => 'required|url',
-            'category_id' => 'required|exists:categories,id',
-            'tags' => 'array',
-        ]);
+        $this->linkService->create($request->user(), $request->validated());
 
-        $link = Link::create([
-            'title' => $request->title,
-            'url' => $request->url,
-            'category_id' => $request->category_id,
-            'user_id' => auth()->id(),
-        ]);
-
-        if ($request->has('tags')) {
-            $link->tags()->sync($request->tags);
-        }
-
-        return redirect()->route('links.index')->with('success', 'Link ajoute avec succes');
+        return redirect()->route('links.index')->with('success', 'Link created successfully.');
     }
 
-    /**
-     * Display the specified resource.
-     */
-    public function show(Link $link)
+    public function show(Link $link): View
     {
-        //
+        $this->authorize('view', $link);
+
+        $link->load(['category', 'tags', 'sharedUsers:id,name']);
+
+        return view('links.show', compact('link'));
     }
 
-    /**
-     * Show the form for editing the specified resource.
-     */
-    public function edit(Link $link)
+    public function edit(Link $link): View
     {
-        $categories = Category::where('user_id', auth()->id())->get();
-        $tags = Tag::all();
+        $this->authorize('update', $link);
+
+        $categories = Category::query()
+            ->where('user_id', auth()->id())
+            ->orderBy('name')
+            ->get();
+
+        $tags = Tag::query()->orderBy('name')->get();
 
         return view('links.edit', compact('link', 'categories', 'tags'));
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
-    public function update(Request $request, Link $link)
+    public function update(UpdateLinkRequest $request, Link $link): RedirectResponse
     {
-        $request->validate([
-            'title' => 'required|string|max:255',
-            'url' => 'required|url',
-            'category_id' => 'required|exists:categories,id',
-            'tags' => 'nullable|array',
-            'tags.*' => 'exists:tags,id',
-        ]);
+        $this->linkService->update($request->user(), $link, $request->validated());
 
-        $link->update([
-            'title' => $request->title,
-            'url' => $request->url,
-            'category_id' => $request->category_id,
-        ]);
-
-        if ($request->has('tags')) {
-            $link->tags()->sync($request->tags);
-        } else {
-            $link->tags()->detach();
-        }
-
-        return redirect()->route('links.index')->with('success', 'link modifie');
+        return redirect()->route('links.index')->with('success', 'Link updated successfully.');
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
-    public function destroy(Link $link)
+    public function destroy(Link $link): RedirectResponse
     {
-        $link->delete();
+        $this->authorize('delete', $link);
 
-        return redirect()->route('links.index')->with('success', 'link supprime');
+        $this->linkService->softDelete(auth()->user(), $link);
+
+        return redirect()->route('links.index')->with('success', 'Link moved to trash.');
+    }
+
+    public function trashed(Request $request): View
+    {
+        $this->authorize('viewAny', Link::class);
+        $user = $request->user() ?? auth()->user();
+
+        $links = Link::onlyTrashed()
+            ->visibleTo($user)
+            ->with(['category', 'tags'])
+            ->latest('deleted_at')
+            ->paginate(15);
+
+        return view('links.trashed', compact('links'));
+    }
+
+    public function restore(int $link): RedirectResponse
+    {
+        $model = Link::withTrashed()->findOrFail($link);
+        $this->authorize('restore', $model);
+
+        $this->linkService->restore(auth()->user(), $model);
+
+        return redirect()->route('links.trashed')->with('success', 'Link restored.');
+    }
+
+    public function forceDelete(int $link): RedirectResponse
+    {
+        $model = Link::withTrashed()->findOrFail($link);
+        $this->authorize('forceDelete', $model);
+
+        $this->linkService->forceDelete(auth()->user(), $model);
+
+        return redirect()->route('links.trashed')->with('success', 'Link permanently deleted.');
+    }
+
+    public function exportCsv(Request $request): StreamedResponse
+    {
+        $this->authorize('viewAny', Link::class);
+        $user = $request->user() ?? auth()->user();
+
+        $query = Link::query()
+            ->visibleTo($user)
+            ->with(['category:id,name', 'tags:id,name'])
+            ->search($request->string('search')->toString())
+            ->latest();
+
+        return response()->streamDownload(function () use ($query) {
+            $out = fopen('php://output', 'w');
+            fputcsv($out, ['id', 'title', 'url', 'category', 'tags', 'created_at']);
+
+            $query->chunk(200, function ($links) use ($out) {
+                foreach ($links as $link) {
+                    fputcsv($out, [
+                        $link->id,
+                        $link->title,
+                        $link->url,
+                        optional($link->category)->name,
+                        $link->tags->pluck('name')->implode('|'),
+                        optional($link->created_at)?->toDateTimeString(),
+                    ]);
+                }
+            });
+
+            fclose($out);
+        }, 'links.csv', [
+            'Content-Type' => 'text/csv',
+        ]);
     }
 }
